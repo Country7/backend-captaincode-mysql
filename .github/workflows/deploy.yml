@@ -1,0 +1,113 @@
+name: Deploy to reg.ru
+# Рабочий deploy с созданием контейнера CentOS 7
+# CentOS 7 нужен для использования GLIBC 2.17 в сборке api_app 
+
+on:
+  push:
+    branches:
+      - deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # Клонирует репозиторий
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      
+      # Устанавливает Docker
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v1
+      
+      # Создание Docker образа
+      - name: Build Docker image
+        run: |
+          echo "FROM centos:7
+          RUN yum -y update && yum -y install wget tar
+          RUN wget -q https://go.dev/dl/go1.22.4.linux-amd64.tar.gz
+          RUN tar -C /usr/local -xzf go1.22.4.linux-amd64.tar.gz
+          ENV PATH=/usr/local/go/bin:\$PATH
+          COPY . /app
+          WORKDIR /app
+          RUN go mod download
+          RUN ldd --version
+          RUN go version
+          RUN go env GOOS GOARCH
+          RUN go build -o api_app .
+          " > Dockerfile
+          docker build -t my-app-image .
+      
+      # Создание контейнера и копирование скомпилированного файла
+      - name: Create Docker container and copy binary
+        run: |
+          docker create --name my-app-container my-app-image true
+          docker cp my-app-container:/app/api_app ./api_app
+          docker rm my-app-container
+      
+      # Настраивает SSH для подключения к серверу БЕЗ ВЫВОДА ключа в логи
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          eval $(ssh-agent)
+          ssh-add ~/.ssh/id_rsa
+      
+      # Сканирует SSH ключи сервера и добавляет их в файл known_hosts, чтобы избежать ошибки проверки подлинности хоста
+      - name: Add server to known_hosts
+        run: |
+          ssh-keyscan website-reg.ru >> ~/.ssh/known_hosts
+      
+      # Создает директорию /app на вашем сервере, если она не существует
+      - name: Create directory on server
+        run: |
+          ssh user@website-reg.ru 'mkdir -p ~/app'
+          ssh user@website-reg.ru 'mkdir -p ~/app/db'
+      
+      # Передает приложение и миграционные файлы на сервер, останавливает старую версию приложения,
+      # устанавливает MySQL клиент, выполняет миграции и запускает новую версию приложения.
+      - name: Deploy to server
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_DRIVER: mysql
+          DB_SOURCE: ${{ secrets.DB_SOURCE }}
+          SERVER_ADDRESS: ${{ secrets.SERVER_ADDRESS }}
+          TOKEN_SYMMETRIC_KEY: ${{ secrets.TOKEN_SYMMETRIC_KEY }}
+          ACCESS_TOKEN_DURATION: 15m
+          REFRESH_TOKEN_DURATION: 24h
+        run: |
+          echo "Copying files to server..."
+          scp -r ./api_app user@website-reg.ru:~/app
+          scp -r ./db/migration user@website-reg.ru:~/app/db
+          echo "Copying environment variables to server..."
+          ssh user@website-reg.ru << 'EOF'
+            echo "DB_DRIVER=mysql" > ~/app/app.env
+            echo "DATABASE_URL=\"${{ secrets.DATABASE_URL }}\"" >> ~/app/app.env
+            echo "DB_SOURCE=\"${{ secrets.DB_SOURCE }}\"" >> ~/app/app.env
+            echo "SERVER_ADDRESS=\"${{ secrets.SERVER_ADDRESS }}\"" >> ~/app/app.env
+            echo "TOKEN_SYMMETRIC_KEY=${{ secrets.TOKEN_SYMMETRIC_KEY }}" >> ~/app/app.env
+            echo "ACCESS_TOKEN_DURATION=15m" >> ~/app/app.env
+            echo "REFRESH_TOKEN_DURATION=24h" >> ~/app/app.env
+          EOF
+          echo "Checking contents of ~/app on server..."
+          ssh user@website-reg.ru 'ls -la ~/app'
+          echo "Running deployment commands on server..."
+          ssh user@website-reg.ru << 'EOF'
+            set -e
+            echo "Stopping existing application..."
+            pkill api_app || true
+            if ! command -v mysql &> /dev/null
+            then
+              echo "MySQL client could not be found"
+              exit 1
+            fi
+            echo "Applying database migrations..."
+            set -o allexport; source ~/app/app.env; set +o allexport
+            ~/migrate -path ~/app/db/migration -database $DATABASE_URL -verbose up
+            echo "Deploying new version..."
+            echo "under the comment - cd ~/app"
+            echo "under the comment - ./api_app &"
+            cd ~/app
+            nohup ./api_app &> api_app.log &
+            echo "Deployment completed!"
+          EOF

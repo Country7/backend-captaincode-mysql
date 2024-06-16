@@ -1,0 +1,49 @@
+version: "3.9"
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: mysql8
+    restart: always
+    environment:
+      - MYSQL_ROOT_PASSWORD=secret
+      - MYSQL_DATABASE=main_db
+    #networks:
+    #  - cc-network
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    image: captaincode:latest
+    container_name: captaincode
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_HOST: mysql8
+      DATABASE_USER: mysqluser
+      DATABASE_PASSWORD: secretpass
+      DATABASE_NAME: main_db
+    #networks:
+    #  - cc-network
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: always
+
+#networks:
+#  cc-network:
+#    driver: bridge
+
+networks:
+  default:
+    name: cc-network
+    #external: true

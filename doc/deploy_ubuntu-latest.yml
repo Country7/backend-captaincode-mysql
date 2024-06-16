@@ -1,0 +1,111 @@
+name: Deploy to reg.ru
+# Рабочий deploy, но на reg.ru (OS - CentOS 7) собранный api_app выдает ошибку
+# Собранный api_app нуждается в GLIBC 2.34, а на сервере GLIBC 2.17
+
+on:
+  push:
+    branches:
+      # - main
+      - deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Клонирует репозиторий
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      # Настраивает SSH для подключения к серверу
+      - name: Set up SSH
+        uses: webfactory/ssh-agent@v0.5.3
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      # Устанавливает Go и MySQL клиент на сервере
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y golang-go mysql-client
+      # Скачивает зависимости и собирает проект
+      - name: Build the project
+        run: |
+          go mod download
+          go build -o api_app .
+      # Устанавливает инструмент миграций migrate
+      - name: Install migrate
+        run: |
+          curl -L https://github.com/golang-migrate/migrate/releases/download/v4.14.1/migrate.linux-amd64.tar.gz | tar xvz
+          sudo mv migrate.linux-amd64 /usr/local/bin/migrate
+      # сканирует SSH ключи сервера и добавляет их в файл known_hosts, чтобы избежать ошибки проверки подлинности хоста
+      - name: Add server to known_hosts
+        run: |
+          ssh-keyscan website-reg.ru >> ~/.ssh/known_hosts
+      # создает директорию /app на вашем сервере, если она не существует
+      - name: Create directory on server
+        run: |
+          ssh user@website-reg.ru 'mkdir -p ~/app'
+          ssh user@website-reg.ru 'mkdir -p ~/app/db'
+
+      # Передает приложение и миграционные файлы на сервер, останавливает старую версию приложения, 
+      # устанавливает MySQL клиент, выполняет миграции и запускает новую версию приложения.
+      # export DATABASE_URL="mysql://user_default:password@tcp(localhost:3306)/user_main_db"
+      # curl -L https://github.com/golang-migrate/migrate/releases/download/v4.17.0/migrate.linux-amd64.tar.gz | tar xvz
+      # echo "Installing MySQL client..."
+      #      apt-get update
+      #      apt-get install -y mysql-client
+      - name: Deploy to server
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DB_DRIVER: mysql
+          DB_SOURCE_TESTSQLC: root:secret@tcp(localhost:3306)/main_db?parseTime=true
+          DB_SOURCE: ${{ secrets.DB_SOURCE }}
+          SERVER_ADDRESS: 0.0.0.0:8080
+          TOKEN_SYMMETRIC_KEY: ${{ secrets.TOKEN_SYMMETRIC_KEY }}
+          ACCESS_TOKEN_DURATION: 15m
+          REFRESH_TOKEN_DURATION: 24h
+        run: |
+          echo "Copying files to server..."
+          scp -r ./api_app user@website-reg.ru:~/app
+          scp -r ./db/migration user@website-reg.ru:~/app/db
+
+          echo "Copying environment variables to server..."
+          ssh user@website-reg.ru << 'EOF'
+            echo "DB_DRIVER=mysql" > ~/app/app.env
+            echo "DB_SOURCE_TESTSQLC=\"root:secret@tcp(localhost:3306)/main_db?parseTime=true\"" >> ~/app/app.env
+            echo "DATABASE_URL=\"${{ secrets.DATABASE_URL }}\"" >> ~/app/app.env
+            echo "DB_SOURCE=\"${{ secrets.DB_SOURCE }}\"" >> ~/app/app.env
+            echo "SERVER_ADDRESS=0.0.0.0:8080" >> ~/app/app.env
+            echo "TOKEN_SYMMETRIC_KEY=${{ secrets.TOKEN_SYMMETRIC_KEY }}" >> ~/app/app.env
+            echo "ACCESS_TOKEN_DURATION=15m" >> ~/app/app.env
+            echo "REFRESH_TOKEN_DURATION=24h" >> ~/app/app.env
+          EOF
+
+          echo "Checking contents of ~/app on server..."
+          ssh user@website-reg.ru 'ls -la ~/app'
+
+          echo "Running deployment commands on server..."
+          ssh user@website-reg.ru << 'EOF'
+            set -e
+            echo "Stopping existing application..."
+            pkill api_app || true
+
+            if ! command -v mysql &> /dev/null
+            then
+              echo "MySQL client could not be found"
+              exit 1
+            fi
+
+            echo "Applying database migrations..."
+            set -o allexport; source ~/app/app.env; set +o allexport
+            ~/migrate -path ~/app/db/migration -database $DATABASE_URL -verbose up
+
+            echo "Deploying new version..."
+            cd ~/app
+            ./api_app &
+            
+            echo "Deployment completed!"
+          EOF
+
+# Использование флага -t в SSH командах принудительно выделяет псевдо-терминал для SSH сессии, 
+# что может помочь устранить сообщение "Pseudo-terminal will not be allocated because stdin is not a terminal".
+# ssh -t user@website-reg.ru 'ls -la ~/app'

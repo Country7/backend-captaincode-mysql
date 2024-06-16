@@ -1,0 +1,67 @@
+# This workflow will build a golang project
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
+
+name: Run unit test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    # https://docs.github.com/en/actions/using-containerized-services/creating-postgresql-service-containers
+    # Service containers to run with `container-job`
+    services:
+      mysql:
+        image: mysql:8
+        # Provide the password for mysql
+        env:
+          MYSQL_ROOT_PASSWORD: secret
+          MYSQL_DATABASE: main_db
+          MYSQL_USER: mysqluser
+          MYSQL_PASSWORD: secretpass
+        ports:
+          - 3306:3306
+        # Set health checks to wait until mysql has started
+        # --health-cmd "mysqladmin ping --silent"
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 --silent"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DB_SOURCE: "root:secret@tcp(localhost:3306)/main_db?charset=utf8mb4&parseTime=True&loc=Local"
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.22'
+
+      - name: Install MySQL Client
+        run: sudo apt-get install -y mysql-client
+      #- name: Configure MySQL Authentication
+      #  run: |
+      #    mysql -h localhost -P 3306 --protocol=TCP main_db -u root -psecret -e "ALTER USER 'root'@'%' IDENTIFIED WITH mysql_native_password BY 'secret';"
+      #    mysql -h localhost -P 3306 --protocol=TCP main_db -u root -psecret -e "ALTER USER 'mysqluser'@'%' IDENTIFIED WITH mysql_native_password BY 'secretpass';"
+      - name: Install golang-migrate
+        run: |
+          curl -L https://github.com/golang-migrate/migrate/releases/download/v4.17.0/migrate.linux-amd64.tar.gz | tar xvz
+          sudo mv migrate /usr/bin/
+          which migrate
+
+      - name: Run Migrations
+        run: make migrate-up
+
+      - name: Test
+        env:
+          DB_SOURCE: "root:secret@tcp(localhost:3306)/main_db?charset=utf8mb4&parseTime=True&loc=Local"
+          # DB_SOURCE: ${{ secrets.DB_SOURCE }}
+        run: go test -v -cover ./...

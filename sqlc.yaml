@@ -1,0 +1,22 @@
+version: "2"
+sql:
+    - engine: "mysql"           # тип базы данных
+      schema: "./db/migration/" # Путь к файлу(ам) схемы базы данных
+      queries: "./db/query/"    # Путь к файлу(ам) SQL-запросов
+      gen:
+          go:
+              package: "db"     # Имя пакета для сгенерированного кода
+              out: "./db/sqlc"  # Путь к директории, куда будет помещен сгенерированный код
+              # sql_package: "pgx/v5"
+              emit_json_tags: true  # добавляет JSON-теги к полям сгенерированных структур
+              emit_prepared_queries: false  # генерировать функции, которые не используют подготовленные запросы
+              emit_interface: true  # генерировать интерфейс, который будет содержать все методы, соответствующие
+              # SQL-запросам, определенным в файлах запросов. Это позволяет вам легко мокировать или заменять 
+              # реализации методов в тестах или при необходимости менять реализацию без изменения клиентского кода
+              emit_exact_table_names: false  # преобразования к именам таблиц в camel case, чтобы сделать их более идиоматичными для Go
+              emit_empty_slices: true  # сгенерированные функции должны возвращать пустые срезы вместо nil 
+      database:
+          # uri: "postgresql://postgres:postgres@localhost:5432/postgres"
+          # uri: "postgresql://root:secret@localhost:5432/main_db"
+          # uri: "mysql://root:secret@tcp(localhost:3306)/main_db"
+          uri: "mysql://mysqluser:secretpass@tcp(localhost:3306)/main_db"
